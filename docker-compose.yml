@@ -1,0 +1,115 @@
+version: "3.7"
+services:
+  uploader:
+    build:
+      context: ./
+      dockerfile: ./uploader/Dockerfile
+    container_name: upload_ms
+    env_file:
+      - ./.env
+    volumes:
+      - ./uploader/.:/app/.
+      - ./packed/.:/packed/.
+    command: yarn start:dev
+    depends_on:
+      - kafka
+      - zookeeper
+      - db
+    ports:
+      - 8000:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - restapi_network
+  db:
+    image: postgres
+    container_name: transcode_db
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    networks:
+      - restapi_network
+  nginx:
+    image: nginx:bookworm
+    container_name: yt_nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - NGINX_HOST=localhost
+      - NGINX_PORT=80
+    networks:
+      - restapi_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  zookeeper:
+    image: "docker.io/bitnami/zookeeper:3-debian-10"
+    container_name: yt_zookeeper
+    ports:
+      - 2181:2181
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    networks:
+      - restapi_network
+  kafka:
+    image: "docker.io/bitnami/kafka:2-debian-10"
+    container_name: yt_kafka
+    ports:
+      - 9092:9092
+      - 9093:9093
+    environment:
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://kafka:9093
+      - KAFKA_INTER_BROKER_LISTENER_NAME=CLIENT
+    depends_on:
+      - zookeeper
+    networks:
+      - restapi_network
+  minio:
+    image: minio/minio
+    container_name: minio
+    env_file:
+      - ./.env
+    ports:
+      - 9000:9000
+      - 9099:9099
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_SERVER_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SERVER_SECRET_KEY}
+    command: server --address ":9099" --console-address ":9000" /data
+    networks:
+      - restapi_network
+  minio-createbuckets:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc config host add minio http://minio:9099 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb minio/pending-transcode;
+      /usr/bin/mc policy set download minio/pending-transcode;
+      /usr/bin/mc mb minio/video;
+      /usr/bin/mc policy set download minio/video;
+      /usr/bin/mc mb minio/static;
+      /usr/bin/mc policy set download minio/static;
+      /usr/bin/mc admin user add minio ${MINIO_SERVER_ACCESS_KEY} ${MINIO_SERVER_SECRET_KEY};
+      /usr/bin/mc admin policy set minio readwrite user=${MINIO_SERVER_ACCESS_KEY}
+
+      exit 0
+      "
+    networks:
+      - restapi_network
+networks:
+  restapi_network:
+    driver: bridge
